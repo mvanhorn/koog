@@ -203,7 +203,6 @@ The strategy graph can contain multiple subgraphs. Each subgraph is defined by u
         .withInput(String.class)
         .withOutput(Integer.class)
         // Define nodes and edges for this subgraph
-        .build();
 
     // Define nodes and edges for secondSubgraph
     ```
@@ -527,6 +526,7 @@ For workflows that require executing multiple tools in parallel, you can use the
     import ai.koog.prompt.message.Message;
     import java.util.List;
     class exampleCustomStrategyGraphsJava07 {
+        @SuppressWarnings("unchecked")
         public static void main(String[] args) {
             var strategy = AIAgentGraphStrategy.builder("strategy_name")
                 .withInput(String.class)
