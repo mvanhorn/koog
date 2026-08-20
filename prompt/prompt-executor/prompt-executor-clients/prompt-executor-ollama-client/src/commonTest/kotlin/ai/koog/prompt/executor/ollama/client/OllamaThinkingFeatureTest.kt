@@ -8,8 +8,14 @@ import ai.koog.prompt.executor.ollama.client.dto.OllamaChatResponseDTO
 import ai.koog.prompt.message.MessagePart
 import ai.koog.prompt.streaming.StreamFrame
 import io.ktor.client.HttpClient
+import io.ktor.client.engine.mock.MockEngine
+import io.ktor.client.engine.mock.respond
+import io.ktor.http.HttpHeaders
+import io.ktor.http.HttpStatusCode
+import io.ktor.http.headersOf
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.json.Json
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
@@ -151,11 +157,9 @@ class OllamaThinkingFeatureTest {
     }
 
     @Test
-    fun `test streaming response with thinking content`() = runTest {
+    fun testStreamingResponseWithReasoningOnly() = runTest {
         val thinkingContent = "Thinking through the problem..."
-        val responseContent = "Final answer"
 
-        // For streaming, we need to simulate multiple chunks
         val streamingResponses = listOf(
             OllamaChatResponseDTO(
                 model = "test-model",
@@ -170,15 +174,6 @@ class OllamaThinkingFeatureTest {
                 model = "test-model",
                 message = OllamaChatMessageDTO(
                     role = "assistant",
-                    content = responseContent,
-                    thinking = null
-                ),
-                done = false
-            ),
-            OllamaChatResponseDTO(
-                model = "test-model",
-                message = OllamaChatMessageDTO(
-                    role = "assistant",
                     content = "",
                     thinking = null
                 ),
@@ -207,28 +202,39 @@ class OllamaThinkingFeatureTest {
             model = OllamaModels.Meta.LLAMA_3_2
         ).toList()
 
-        // Verify that we have stream frames
-        assertTrue(streamFrames.isNotEmpty(), "Should have stream frames")
-
-        // Check for thinking stream frames
-        val thinkingFrames = streamFrames.filterIsInstance<StreamFrame.ReasoningDelta>()
-        assertTrue(thinkingFrames.isNotEmpty(), "Should have at least one thinking frame")
-
-        // Verify thinking content is present
-        val allThinkingContent = thinkingFrames.joinToString("") { it.text.orEmpty() }
-        assertTrue(allThinkingContent.contains(thinkingContent), "Thinking content should be in frames")
+        assertEquals(3, streamFrames.size)
+        assertEquals(StreamFrame.ReasoningDelta(text = thinkingContent), streamFrames[0])
+        assertEquals(
+            StreamFrame.ReasoningComplete(id = null, content = listOf(thinkingContent)),
+            streamFrames[1]
+        )
+        val end = assertIs<StreamFrame.End>(streamFrames[2])
+        assertNull(end.metaInfo.inputTokensCount)
+        assertNull(end.metaInfo.outputTokensCount)
+        assertNull(end.metaInfo.totalTokensCount)
     }
 
     @Test
-    fun `test streaming response with content only`() = runTest {
+    fun testStreamingResponseCompletesContentWithUsage() = runTest {
         val responseContent = "Streaming response content"
+        val promptTokens = 12
+        val responseTokens = 8
 
         val streamingResponses = listOf(
             OllamaChatResponseDTO(
                 model = "test-model",
                 message = OllamaChatMessageDTO(
                     role = "assistant",
-                    content = responseContent,
+                    content = "Streaming ",
+                    thinking = null
+                ),
+                done = false
+            ),
+            OllamaChatResponseDTO(
+                model = "test-model",
+                message = OllamaChatMessageDTO(
+                    role = "assistant",
+                    content = "response content",
                     thinking = null
                 ),
                 done = false
@@ -240,24 +246,33 @@ class OllamaThinkingFeatureTest {
                     content = "",
                     thinking = null
                 ),
-                done = true
+                done = true,
+                promptEvalCount = promptTokens,
+                evalCount = responseTokens
+            ),
+            OllamaChatResponseDTO(
+                model = "test-model",
+                message = OllamaChatMessageDTO(
+                    role = "assistant",
+                    content = "ignored after done",
+                    thinking = null
+                ),
+                done = true,
+                promptEvalCount = 100,
+                evalCount = 200
             )
         )
 
-        var responseIndex = 0
-        val mockServer = MockStreamingOllamaChatServer {
-            val response = streamingResponses.getOrNull(responseIndex)
-                ?: OllamaChatResponseDTO(
-                    model = "test-model",
-                    message = null,
-                    done = true
-                )
-            responseIndex++
-            response
+        val mockEngine = MockEngine {
+            respond(
+                content = streamingResponses.joinToString("\n") { Json.encodeToString(it) },
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType to listOf("application/json")),
+            )
         }
 
         val ollamaClient = OllamaClient(
-            httpClientFactory = KtorKoogHttpClient.Factory(HttpClient(mockServer.mockEngine))
+            httpClientFactory = KtorKoogHttpClient.Factory(HttpClient(mockEngine))
         )
 
         val streamFrames = ollamaClient.executeStreaming(
@@ -265,16 +280,14 @@ class OllamaThinkingFeatureTest {
             model = OllamaModels.Meta.LLAMA_3_2
         ).toList()
 
-        // Verify that we have stream frames
-        assertTrue(streamFrames.isNotEmpty(), "Should have stream frames")
-
-        // Check for append frames
-        val textFrames = streamFrames.filterIsInstance<StreamFrame.TextDelta>()
-        assertTrue(textFrames.isNotEmpty(), "Should have at least one text frame")
-
-        // Verify content is present
-        val allContent = textFrames.joinToString("") { it.text }
-        assertTrue(allContent.contains(responseContent), "Response content should be in frames")
+        assertEquals(4, streamFrames.size)
+        assertEquals(StreamFrame.TextDelta("Streaming "), streamFrames[0])
+        assertEquals(StreamFrame.TextDelta("response content"), streamFrames[1])
+        assertEquals(StreamFrame.TextComplete(responseContent), streamFrames[2])
+        val end = assertIs<StreamFrame.End>(streamFrames[3])
+        assertEquals(promptTokens, end.metaInfo.inputTokensCount)
+        assertEquals(responseTokens, end.metaInfo.outputTokensCount)
+        assertEquals(promptTokens + responseTokens, end.metaInfo.totalTokensCount)
     }
 
     @Test

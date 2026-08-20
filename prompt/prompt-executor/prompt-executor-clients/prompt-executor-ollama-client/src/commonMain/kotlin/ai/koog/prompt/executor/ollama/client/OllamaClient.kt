@@ -46,6 +46,7 @@ import ai.koog.utils.time.KoogClock
 import io.github.oshai.kotlinlogging.KotlinLogging
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlin.jvm.JvmOverloads
@@ -249,25 +250,6 @@ public class OllamaClient @JvmOverloads constructor(
         val message = response.message
             ?: throw LLMClientException(clientName = clientName, message = "Missing message in Ollama response")
 
-        // Get token counts from the response, or use null if not available
-        val promptTokenCount = response.promptEvalCount
-        val responseTokenCount = response.evalCount
-
-        // Calculate total tokens (prompt + response) if both are available
-        val totalTokensCount = when {
-            promptTokenCount != null && responseTokenCount != null -> promptTokenCount + responseTokenCount
-            promptTokenCount != null -> promptTokenCount
-            responseTokenCount != null -> responseTokenCount
-            else -> null
-        }
-
-        val responseMetadata = ResponseMetaInfo.create(
-            clock,
-            totalTokensCount = totalTokensCount,
-            inputTokensCount = promptTokenCount,
-            outputTokensCount = responseTokenCount,
-        )
-
         return Message.Assistant(
             parts = buildList {
                 message.content.takeIf { it.isNotEmpty() }?.let { add(MessagePart.Text(it)) }
@@ -285,7 +267,25 @@ public class OllamaClient @JvmOverloads constructor(
                     )
                 }
             },
-            metaInfo = responseMetadata,
+            metaInfo = createResponseMetaInfo(response),
+        )
+    }
+
+    private fun createResponseMetaInfo(response: OllamaChatResponseDTO): ResponseMetaInfo {
+        val promptTokenCount = response.promptEvalCount
+        val responseTokenCount = response.evalCount
+        val totalTokensCount = when {
+            promptTokenCount != null && responseTokenCount != null -> promptTokenCount + responseTokenCount
+            promptTokenCount != null -> promptTokenCount
+            responseTokenCount != null -> responseTokenCount
+            else -> null
+        }
+
+        return ResponseMetaInfo.create(
+            clock,
+            totalTokensCount = totalTokensCount,
+            inputTokensCount = promptTokenCount,
+            outputTokensCount = responseTokenCount,
         )
     }
 
@@ -314,7 +314,7 @@ public class OllamaClient @JvmOverloads constructor(
             path = DEFAULT_MESSAGE_PATH,
             requestBody = request,
             headers = jsonContentHeaders
-        ).collect { line ->
+        ).firstOrNull { line ->
             try {
                 val chunk = ollamaJson.decodeFromString<OllamaChatResponseDTO>(line)
                 chunk.message?.let { message ->
@@ -336,8 +336,13 @@ public class OllamaClient @JvmOverloads constructor(
                         tryEmitPendingToolCall()
                     }
                 }
+                if (chunk.done) {
+                    emitEnd(metaInfo = createResponseMetaInfo(chunk))
+                }
+                chunk.done
             } catch (_: Exception) {
                 // Skip malformed JSON lines
+                false
             }
         }
     }
